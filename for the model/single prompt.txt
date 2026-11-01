@@ -1,0 +1,45 @@
+here is the single prompt for haiku or claude to write the rte demo (route)
+
+"rte" is a tokyo style car driving demo on the japanese freeway (like the shuto expressway.) the road never stops or slows down, and is generated endlessly. the city is just a bunch of skyscrapers.
+
+[the demo is a japanesque.] the demo will feature a generic japanese car on a generic japanese highway. this is not a simulator. the difference lies in symbols, signage and other stuff.
+
+[not a game.] there are no controls. rte is like a screensaver, or a demo, rather than a playable game.
+
+[rendering pipeline.] just use a basic three.js setup. the goal is to get the that japanese sports car driving on that highway. i will tweak the renderer myself, and add shading effects later.
+
+[write one big script.] keep writing and don't stop.
+
+[be smart.] your goal is to meet project goals, not to write beautiful code. if it works it works.
+
+[use open source if it works.] if you can find code in car games or other drive demos that are open source, just use it.
+
+[write in whatever difficulty.] the code does not have to "look sane." if the agent can maintain the code cheaply, that is a win. just make sure to;
+
+[put config values at the top of the files.] make sure i can easily access generation constants and values, like at the top of the script.
+
+[no left-hand traffic.] left is fast lane, right is slow lane. ignore the fact that this is incorrect for japan.
+
+[suspended highway.] the highway in the demo shutoespressway will always be elevated. don't worry about placing supports, we don't see them.
+
+[the road is winding.] most of the time, the road is winding, so not going straight. there may be straights, but those only continue for so long, before the next big bend (or short bend.)
+
+[roadway lighting.] make sure to add street lamps at regular intervals, with working spotlights.
+
+[traffic signs.] we will worry about adding traffic signs later.
+
+[guard rails.] for now use concrete barriers over guard rails.
+
+[toll control points.] add a small chance of a toll building that sits over the road where cars have to slow down.
+
+[simple traffic simulation.] add simple cars as traffic as gray boxes that only drive in the "slow" lane.
+
+[weaving.] as a bonus, our sports car should be able to weave through traffic, because that's just super cool.
+
+[cinematic cameras.] beside our "chase camera", add a "front low angle camera", a "low rear quarter camera" and a "wheel close up camera". the demo sometimes "changes shot."
+
+[the fog is the lod.] besides using frustum culling, use the fog as a guideline for when to remove objects from the scene.
+
+[reuse objects.] to prevent fps spikes, place objects that share geometry and materials.
+
+[use placeholder objects.] don't try to generate complex geometry, use gray boxes or rectangles; i will personally source and supply 3d models that fit the demo.
