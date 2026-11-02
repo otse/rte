@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>rte - Shuto Expressway</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d1c; }
+  canvas { display: block; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+// ============================================================
+// CONFIG
+// ============================================================
+const CFG = {
+  // world
+  ROAD_Y: 12,              // deck height above ground
+  LANE_W: 3.6,             // lane width
+  DECK_HALF: 4.6,          // half width of the deck (2 lanes + shoulders)
+  STEP: 2,                 // path sample spacing (m)
+  CHUNK_LEN: 120,          // road length per chunk (m)
+  FOG_NEAR: 120,
+  FOG_FAR: 900,            // nothing is generated beyond this distance
+  KEEP_BEHIND: 150,        // chunks/traffic further behind the car are removed
+  BG: 0x0b0d1c,
+
+  // road shape
+  STRAIGHT_LEN: [150, 450],
+  BEND_LEN: [80, 220],
+  BEND_CURV: [0.0025, 0.008],    // rad per m
+  SHORT_CHANCE: 0.35,
+  SHORT_LEN: [25, 60],
+  SHORT_CURV: [0.02, 0.035],
+  BEND_CURV_EASE: 0.1,
+
+  // city
+  BUILD_PER_CHUNK: 14,
+  BUILD_OFFSET: [28, 150],
+  BUILD_W: [12, 32],
+  BUILD_H: [30, 200],
+
+  // lamps
+  LAMP_SPACING: 45,
+  SPOT_POOL: 4,
+
+  // toll
+  TOLL_CHANCE: 0.12,
+  TOLL_ZONE: 45,           // half length of the slow zone around a toll
+  TOLL_SPEED: 8,           // m/s
+
+  // car
+  MODEL_URL: 'models/toyota_ae86_sprinter_trueno_zenki.glb',
+  CAR_LENGTH: 4.2,
+  CAR_YAW_OFFSET: 0,       // extra yaw (rad) if the model faces the wrong way
+  WHEELBASE: 2.4,
+  CRUISE: 31,              // m/s
+  ACCEL: 4,
+  BRAKE: 7,
+  WEAVE_RATE: 0.08,        // chance per second to dart into the slow lane
+  WEAVE_HOLD: [2, 4.5],
+
+  // traffic (gray boxes, slow lane only)
+  TRAFFIC_COUNT: 20,
+  TRAFFIC_SPEED: [16, 22],
+  TRAFFIC_GAP: [28, 60],
+  TRAFFIC_SPAWN_MIN: 180,
+  TRAFFIC_SIZE: [1.8, 1.5, 4.2],
+
+  // cameras
+  SHOT_TIME: [6, 12],
+};
+
+const FAST = -CFG.LANE_W / 2;
+const SLOW = CFG.LANE_W / 2;
+const CHUNK = CFG.CHUNK_LEN;
+const LAMP = CFG.LAMP_SPACING;
+const AHEAD = CFG.FOG_FAR + CHUNK;
+const DECK = CFG.DECK_HALF;
+const ROAD_Y = CFG.ROAD_Y;
+const PALETTE = [0x3a4152, 0x566070, 0x2b3142, 0x6d6a78, 0x8a7f8f, 0x404a5c];
+
+const rnd = (a, b) => a + Math.random() * (b - a);
+const range = (r) => rnd(r[0], r[1]);
+const choice = (arr) => arr[(Math.random() * arr.length) | 0];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+// ============================================================
+// RENDERER / SCENE
+// ============================================================
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(CFG.BG);
+scene.fog = new THREE.Fog(CFG.BG, CFG.FOG_NEAR, CFG.FOG_FAR);
+
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 3000);
+
+scene.add(new THREE.HemisphereLight(0x6677aa, 0x101018, 0.9));
+const sun = new THREE.DirectionalLight(0xbfd0ff, 0.6);
+sun.position.set(-80, 120, 40);
+scene.add(sun);
+
+const MAT = {
+  ground:   new THREE.MeshStandardMaterial({ color: 0x14161f, roughness: 1 }),
+  deck:     new THREE.MeshStandardMaterial({ color: 0x1d1f26, roughness: 0.9, side: THREE.DoubleSide }),
+  mark:     new THREE.MeshBasicMaterial({ color: 0xdddddd, side: THREE.DoubleSide }),
+  barrier:  new THREE.MeshStandardMaterial({ color: 0x8d8f94, roughness: 0.85 }),
+  pole:     new THREE.MeshStandardMaterial({ color: 0x2a2c33, roughness: 0.6 }),
+  lampHead: new THREE.MeshBasicMaterial({ color: 0xffe2a0 }),
+  bldg:     new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.7 }),
+  toll:     new THREE.MeshStandardMaterial({ color: 0x565b66, roughness: 0.8 }),
+  sign:     new THREE.MeshStandardMaterial({ color: 0x1f6b3a, roughness: 0.6 }),
+  traffic:  new THREE.MeshStandardMaterial({ color: 0x7d7f85, roughness: 0.5 }),
+};
+const GEO = {
+  unit:    new THREE.BoxGeometry(1, 1, 1),
+  barrier: new THREE.BoxGeometry(0.7, 1, CFG.STEP * 1.02),
+  pole:    new THREE.BoxGeometry(0.35, 9, 0.35),
+  head:    new THREE.BoxGeometry(1.4, 0.25, 0.5),
+  traffic: new THREE.BoxGeometry(...CFG.TRAFFIC_SIZE),
+};
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(6000, 6000), MAT.ground);
+ground.rotation.x = -Math.PI / 2;
+scene.add(ground);
+
+// ============================================================
+// PATH (procedural, arc-length parameterised)
+// ============================================================
+const samples = [{ s: 0, x: 0, z: 0, th: 0 }];
+const gen = { s: 0, x: 0, z: 0, th: 0, curv: 0, target: 0, remain: 200 };
+
+function nextSegment() {
+  if (Math.random() < 0.4) {
+    gen.target = 0;
+    gen.remain = range(CFG.STRAIGHT_LEN);
+    return;
+  }
+  const sign = Math.random() < 0.75 ? (gen.th > 0 ? -1 : 1) : (Math.random() < 0.5 ? -1 : 1);
+  if (Math.random() < CFG.SHORT_CHANCE) {
+    gen.target = sign * range(CFG.SHORT_CURV);
+    gen.remain = range(CFG.SHORT_LEN);
+  } else {
+    gen.target = sign * range(CFG.BEND_CURV);
+    gen.remain = range(CFG.BEND_LEN);
+  }
+}
+
+function pushSample() {
+  if (gen.remain <= 0) nextSegment();
+  gen.remain -= CFG.STEP;
+  gen.curv += (gen.target - gen.curv) * CFG.BEND_CURV_EASE;
+  gen.th += gen.curv * CFG.STEP;
+  gen.x += Math.sin(gen.th) * CFG.STEP;
+  gen.z += Math.cos(gen.th) * CFG.STEP;
+  gen.s += CFG.STEP;
+  samples.push({ s: gen.s, x: gen.x, z: gen.z, th: gen.th });
+}
+
+function poseAt(s) {
+  const last = samples.length - 1;
+  if (s <= samples[0].s) return samples[0];
+  if (s >= samples[last].s) return samples[last];
+  let lo = 0, hi = last;
+  while (hi - lo > 1) {
+    const m = (lo + hi) >> 1;
+    if (samples[m].s <= s) lo = m; else hi = m;
+  }
+  const a = samples[lo], b = samples[hi];
+  const t = (s - a.s) / (b.s - a.s);
+  return { s, x: a.x + (b.x - a.x) * t, z: a.z + (b.z - a.z) * t, th: a.th + (b.th - a.th) * t };
+}
+
+// lat > 0 is the slow lane (right), lat < 0 the fast lane (left)
+function frame(s, lat, y = ROAD_Y) {
+  const p = poseAt(s);
+  return { x: p.x - Math.cos(p.th) * lat, y, z: p.z + Math.sin(p.th) * lat, th: p.th };
+}
+
+// ============================================================
+// WORLD CHUNKS (road, barriers, lamps, skyscrapers, tolls)
+// ============================================================
+const dummy = new THREE.Object3D();
+function place(im, i, x, y, z, th, sx = 1, sy = 1, sz = 1) {
+  dummy.position.set(x, y, z);
+  dummy.rotation.set(0, th, 0);
+  dummy.scale.set(sx, sy, sz);
+  dummy.updateMatrix();
+  im.setMatrixAt(i, dummy.matrix);
+}
+
+function ribbon(out, s0, s1, latA, latB, y, dashed) {
+  for (let s = s0; s < s1; s += CFG.STEP) {
+    if (dashed && Math.floor(s / 12) % 2) continue;
+    const A = frame(s, latA, y), B = frame(s, latB, y);
+    const C = frame(s + CFG.STEP, latA, y), D = frame(s + CFG.STEP, latB, y);
+    out.push(A.x, y, A.z, C.x, y, C.z, B.x, y, B.z, B.x, y, B.z, C.x, y, C.z, D.x, y, D.z);
+  }
+}
+
+const tolls = [];
+const chunks = [];
+let nextChunkS = 0;
+
+function buildChunk(s0) {
+  const s1 = s0 + CHUNK;
+  while (gen.s < s1 + 2 * CFG.STEP) pushSample();
+  const n = CHUNK / CFG.STEP;
+  const group = new THREE.Group();
+  const owned = [];
+
+  const addMesh = (verts, mat) => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    g.computeVertexNormals();
+    owned.push(g);
+    const m = new THREE.Mesh(g, mat);
+    group.add(m);
+  };
+  const addInst = (geo, mat, count) => {
+    const im = new THREE.InstancedMesh(geo, mat, count);
+    group.add(im);
+    owned.push(im);
+    return im;
+  };
+  const addStatic = (geo, mat, x, y, z, th, sx, sy, sz) => {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    m.rotation.y = th;
+    m.scale.set(sx, sy, sz);
+    group.add(m);
+  };
+
+  // deck + markings
+  const deck = [], marks = [];
+  ribbon(deck, s0, s1, -DECK, DECK, ROAD_Y, false);
+  ribbon(marks, s0, s1, -DECK + 0.4, -DECK + 0.7, ROAD_Y + 0.03, false);
+  ribbon(marks, s0, s1, DECK - 0.7, DECK - 0.4, ROAD_Y + 0.03, false);
+  ribbon(marks, s0, s1, -0.12, 0.12, ROAD_Y + 0.03, true);
+  addMesh(deck, MAT.deck);
+  addMesh(marks, MAT.mark);
+
+  // concrete barriers (instanced, both sides)
+  const bars = addInst(GEO.barrier, MAT.barrier, n * 2);
+  let bi = 0;
+  for (let i = 0; i < n; i++) {
+    const sm = s0 + (i + 0.5) * CFG.STEP;
+    for (const side of [-1, 1]) {
+      const f = frame(sm, side * (DECK + 0.35), ROAD_Y + 0.5);
+      place(bars, bi++, f.x, f.y, f.z, f.th);
+    }
+  }
+
+  // street lamps (poles + heads on both sides), spotlights are a shared pool
+  const k0 = Math.ceil(s0 / LAMP), k1 = Math.floor((s1 - 1) / LAMP);
+  const nl = Math.max(0, k1 - k0 + 1) * 2;
+  const poles = addInst(GEO.pole, MAT.pole, nl);
+  const heads = addInst(GEO.head, MAT.lampHead, nl);
+  let li = 0;
+  for (let k = k0; k <= k1; k++) {
+    for (const side of [-1, 1]) {
+      const p = frame(k * LAMP, side * (DECK + 0.6), ROAD_Y + 4.5);
+      place(poles, li, p.x, p.y, p.z, p.th);
+      const h = frame(k * LAMP, side * (DECK - 0.1), ROAD_Y + 8.9);
+      place(heads, li, h.x, h.y, h.z, h.th);
+      li++;
+    }
+  }
+
+  // skyscrapers (gray boxes, shared unit geometry, per-instance color)
+  const bl = addInst(GEO.unit, MAT.bldg, CFG.BUILD_PER_CHUNK);
+  for (let j = 0; j < CFG.BUILD_PER_CHUNK; j++) {
+    const f = frame(s0 + Math.random() * CHUNK, choice([-1, 1]) * range(CFG.BUILD_OFFSET));
+    const w = range(CFG.BUILD_W), d = range(CFG.BUILD_W), h = range(CFG.BUILD_H);
+    place(bl, j, f.x, h / 2, f.z, 0, w, h, d);
+    bl.setColorAt(j, new THREE.Color(choice(PALETTE)));
+  }
+
+  // toll building over the road (placeholder box + sign)
+  if (Math.random() < CFG.TOLL_CHANCE) {
+    const sT = s0 + CHUNK / 2;
+    tolls.push(sT);
+    const b = frame(sT, 0, ROAD_Y + 6.25);
+    addStatic(GEO.unit, MAT.toll, b.x, b.y, b.z, b.th, 2 * DECK + 4, 3.5, 12);
+    const sg = frame(sT, 0, ROAD_Y + 4.0);
+    addStatic(GEO.unit, MAT.sign, sg.x, sg.y, sg.z, sg.th, 8, 0.8, 0.2);
+  }
+
+  scene.add(group);
+  chunks.push({ s1, group, owned });
+}
+
+function removeChunk(c) {
+  scene.remove(c.group);
+  c.owned.forEach((o) => o.dispose());
+}
+
+function nearToll(s) {
+  return tolls.some((t) => Math.abs(s - t) < CFG.TOLL_ZONE);
+}
+
+// ============================================================
+// TRAFFIC (gray boxes, slow lane)
+// ============================================================
+const traffic = [];
+
+function addTraffic(s) {
+  const mesh = new THREE.Mesh(GEO.traffic, MAT.traffic);
+  scene.add(mesh);
+  const v = range(CFG.TRAFFIC_SPEED);
+  traffic.push({ s, v, base: v, mesh });
+}
+
+function spawnTraffic(carS) {
+  let tail = carS + CFG.TRAFFIC_SPAWN_MIN;
+  for (const t of traffic) tail = Math.max(tail, t.s);
+  while (traffic.length < CFG.TRAFFIC_COUNT) {
+    const s = tail + range(CFG.TRAFFIC_GAP);
+    if (s > carS + CFG.FOG_FAR * 0.9) break;
+    tail = s;
+    addTraffic(s);
+  }
+}
+
+function slowAhead(from, to) {
+  let best = null;
+  for (const t of traffic) {
+    if (t.s > from && t.s <= to && (!best || t.s < best.s)) best = t;
+  }
+  return best;
+}
+
+function updateTraffic(dt) {
+  traffic.sort((a, b) => a.s - b.s);
+  for (let i = 0; i < traffic.length; i++) {
+    const t = traffic[i];
+    const want = nearToll(t.s) ? CFG.TOLL_SPEED : t.base;
+    t.v += clamp(want - t.v, -CFG.BRAKE * dt, CFG.ACCEL * dt);
+    const lead = traffic[i + 1];
+    if (lead && lead.s - t.s < 14) t.v = Math.min(t.v, lead.v);
+    t.s += t.v * dt;
+  }
+}
+
+function placeTraffic(carS) {
+  for (let i = traffic.length - 1; i >= 0; i--) {
+    const t = traffic[i];
+    if (t.s < carS - CFG.KEEP_BEHIND) {
+      scene.remove(t.mesh);
+      traffic.splice(i, 1);
+      continue;
+    }
+    const f = frame(t.s, SLOW, ROAD_Y + CFG.TRAFFIC_SIZE[1] / 2);
+    t.mesh.position.set(f.x, f.y, f.z);
+    t.mesh.rotation.y = f.th;
+  }
+}
+
+// ============================================================
+// CAR (AE86 when available, gray-box placeholder otherwise)
+// ============================================================
+const car = { s: 10, v: CFG.CRUISE * 0.8, lat: FAST, laneTarget: FAST, cool: 0, weaveT: 0, t: 0, x: 0, z: 0, th: 0 };
+const carRoot = new THREE.Group();
+scene.add(carRoot);
+
+function makePlaceholderCar() {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.6, 4.2), new THREE.MeshStandardMaterial({ color: 0xc8102e, roughness: 0.4 }));
+  body.position.y = 0.6;
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.45, 0.55, 2.0), new THREE.MeshStandardMaterial({ color: 0x151515 }));
+  cabin.position.set(0, 1.15, -0.2);
+  g.add(body, cabin);
+  const wheelGeo = new THREE.CylinderGeometry(0.33, 0.33, 0.25, 12);
+  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0a });
+  for (const x of [-0.8, 0.8]) {
+    for (const z of [-1.25, 1.25]) {
+      const w = new THREE.Mesh(wheelGeo, wheelMat);
+      w.rotation.z = Math.PI / 2;
+      w.position.set(x, 0.33, z);
+      g.add(w);
+    }
+  }
+  return g;
+}
+
+function fitModel(obj) {
+  const holder = new THREE.Group();
+  holder.add(obj);
+  obj.rotation.y = CFG.CAR_YAW_OFFSET;
+  holder.updateMatrixWorld(true);
+  let box = new THREE.Box3().setFromObject(holder);
+  const size = box.getSize(new THREE.Vector3());
+  if (size.x > size.z) obj.rotation.y += Math.PI / 2;
+  holder.updateMatrixWorld(true);
+  box = new THREE.Box3().setFromObject(holder);
+  box.getSize(size);
+  holder.scale.setScalar(CFG.CAR_LENGTH / Math.max(size.x, size.z));
+  holder.updateMatrixWorld(true);
+  box = new THREE.Box3().setFromObject(holder);
+  const c = box.getCenter(new THREE.Vector3());
+  holder.position.set(-c.x, -box.min.y, -c.z);
+  return holder;
+}
+
+carRoot.add(makePlaceholderCar());
+new GLTFLoader().load(
+  CFG.MODEL_URL,
+  (gltf) => {
+    carRoot.clear();
+    carRoot.add(fitModel(gltf.scene));
+  },
+  undefined,
+  () => console.warn('[rte] car model not loaded, using placeholder (serve the folder over http to load the .glb)')
+);
+
+function updateCar(dt) {
+  car.t += dt;
+  car.cool -= dt;
+  const toll = nearToll(car.s);
+  const ahead = slowAhead(car.s - 2, car.s + 40);
+
+  if (car.laneTarget === FAST) {
+    const slowClear = !traffic.some((t) => t.s > car.s - 15 && t.s < car.s + 35);
+    if (car.cool <= 0 && !toll && slowClear && Math.random() < CFG.WEAVE_RATE * dt) {
+      car.laneTarget = SLOW;
+      car.weaveT = range(CFG.WEAVE_HOLD);
+      car.cool = 1.5;
+    }
+  } else {
+    car.weaveT -= dt;
+    if (car.cool <= 0 && (car.weaveT <= 0 || ahead)) {
+      car.laneTarget = FAST;
+      car.cool = 1.5;
+    }
+  }
+
+  let want = toll ? CFG.TOLL_SPEED : CFG.CRUISE;
+  if (car.laneTarget === SLOW && ahead) want = Math.min(want, ahead.v);
+  car.v += clamp(want - car.v, -CFG.BRAKE * dt, CFG.ACCEL * dt);
+  car.s += car.v * dt;
+
+  const sway = Math.sin(car.t * 0.6) * 0.15;
+  car.lat += (car.laneTarget + sway - car.lat) * Math.min(1, dt * 2.2);
+
+  const f = frame(car.s, car.lat);
+  car.x = f.x;
+  car.z = f.z;
+  car.th = f.th;
+  carRoot.position.set(f.x, ROAD_Y, f.z);
+  carRoot.rotation.y = f.th;
+}
+
+// ============================================================
+// WORLD MANAGEMENT (fog distance drives generation, behind-distance drives removal)
+// ============================================================
+function manageWorld() {
+  while (nextChunkS < car.s + AHEAD) {
+    buildChunk(nextChunkS);
+    nextChunkS += CHUNK;
+  }
+  while (chunks.length && chunks[0].s1 < car.s - CFG.KEEP_BEHIND) {
+    removeChunk(chunks.shift());
+  }
+  const cutS = car.s - CFG.KEEP_BEHIND - 20;
+  let k = 0;
+  while (k < samples.length - 2 && samples[k + 1].s < cutS) k++;
+  if (k > 0) samples.splice(0, k);
+  tolls.splice(0, tolls.length, ...tolls.filter((t) => t > car.s - CFG.KEEP_BEHIND - CFG.TOLL_ZONE));
+}
+
+// ============================================================
+// SPOTLIGHTS (small pool following the lamps ahead of the car)
+// ============================================================
+const spots = [];
+for (let i = 0; i < CFG.SPOT_POOL; i++) {
+  const sp = new THREE.SpotLight(0xffd9a0, 250, 70, 0.55, 0.5, 2);
+  scene.add(sp, sp.target);
+  spots.push(sp);
+}
+
+function updateSpots() {
+  const k0 = Math.ceil(car.s / LAMP);
+  spots.forEach((sp, i) => {
+    const k = k0 + i;
+    const sk = k * LAMP;
+    const side = k % 2 === 0 ? 1 : -1;
+    const h = frame(sk, side * (DECK - 0.6), ROAD_Y + 8.6);
+    sp.position.set(h.x, h.y, h.z);
+    const g = frame(sk + 20, 0, ROAD_Y);
+    sp.target.position.set(g.x, g.y, g.z);
+  });
+}
+
+// ============================================================
+// CAMERAS (chase, front low, low rear quarter, wheel close-up)
+// ============================================================
+const SHOTS = ['chase', 'frontLow', 'rearQuarter', 'wheel'];
+let shot = 'chase';
+let shotT = range(CFG.SHOT_TIME);
+
+function updateCamera(dt) {
+  shotT -= dt;
+  if (shotT <= 0) {
+    let next;
+    do { next = choice(SHOTS); } while (next === shot);
+    shot = next;
+    shotT = range(CFG.SHOT_TIME);
+  }
+
+  const fx = Math.sin(car.th), fz = Math.cos(car.th);
+  const rx = -fz, rz = fx;
+  const at = (f, r, u) => new THREE.Vector3(car.x + fx * f + rx * r, ROAD_Y + u, car.z + fz * f + rz * r);
+
+  let p, l;
+  switch (shot) {
+    case 'chase':
+      p = at(-9, 0, 3.2);
+      l = at(6, 0, 0.8);
+      break;
+    case 'frontLow':
+      p = at(7, 1.6, 0.25);
+      l = at(0, 0, 0.6);
+      break;
+    case 'rearQuarter':
+      p = at(-4, 3.6, 0.5);
+      l = at(1.5, 0, 0.6);
+      break;
+    case 'wheel':
+      p = at(CFG.WHEELBASE / 2 + 0.9, 1.9, 0.3);
+      l = at(CFG.WHEELBASE / 2, 0.8, 0.33);
+      break;
+  }
+  camera.position.copy(p);
+  camera.lookAt(l);
+}
+
+// ============================================================
+// BOOT + LOOP
+// ============================================================
+manageWorld();
+updateCar(0);
+spawnTraffic(car.s);
+placeTraffic(car.s);
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+let lastT = performance.now();
+function tick(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000);
+  lastT = now;
+
+  updateCar(dt);
+  manageWorld();
+  spawnTraffic(car.s);
+  updateTraffic(dt);
+  placeTraffic(car.s);
+  updateSpots();
+  ground.position.set(car.x, 0, car.z);
+  updateCamera(dt);
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

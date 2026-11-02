@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Home</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #fff;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: #333;
+    }
+    h1 { font-size: 2.2rem; margin: 0 0 .3rem; }
+    p.sub { margin: 0 0 2.5rem; color: #888; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(140px, 200px));
+      gap: 1.5rem;
+    }
+    a.btn {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: .6rem;
+      padding: 1.8rem 1rem;
+      background: #fff;
+      border: 2px solid #f0f0f0;
+      border-radius: 24px;
+      box-shadow: 0 4px 14px rgba(0,0,0,.08);
+      text-decoration: none;
+      color: inherit;
+      font-weight: 600;
+      transition: transform .15s, box-shadow .15s, border-color .15s;
+    }
+    a.btn:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 10px 22px rgba(0,0,0,.12);
+      border-color: #e60012;
+    }
+    a.btn:active { transform: translateY(0); }
+    .emoji { font-size: 3rem; }
+  </style>
+</head>
+<body>
+  <h1>🎮 Choose a Model</h1>
+  <p class="sub">Pick one to get started</p>
+  <div class="grid">
+    <a class="btn" href="grok.html"><span class="emoji">🚀</span>Grok</a>
+    <a class="btn" href="mai-code-flash.html"><span class="emoji">⚡</span>MAI Code Flash</a>
+    <a class="btn" href="claude-haiku.html"><span class="emoji">🌸</span>Claude Haiku</a>
+    <a class="btn" href="claude-sonnet.html"><span class="emoji">🎼</span>Claude Sonnet</a>
+  </div>
+</body>
+</html>

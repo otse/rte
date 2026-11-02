@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RTE Demo</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #b7d0e7;
+        font-family: Arial, Helvetica, sans-serif;
+      }
+      body {
+        position: relative;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      #hud {
+        position: absolute;
+        left: 20px;
+        top: 16px;
+        color: rgba(255,255,255,0.8);
+        font-size: 11px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        padding: 8px 12px;
+        border: 1px solid rgba(255,255,255,0.15);
+        background: rgba(10, 12, 18, 0.18);
+        backdrop-filter: blur(3px);
+        user-select: none;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud">RTE · Shuto Expressway</div>
+    <script type="module">
+      import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.159.0/build/three.module.js';
+
+      const CONFIG = {
+        roadWidth: 34,
+        laneWidth: 10,
+        roadY: 6,
+        roadSegLength: 34,
+        worldSpeed: 118,
+        farDistance: 1200,
+        fogNear: 70,
+        fogFar: 620,
+        towerCount: 180,
+        lampSpacing: 48,
+        lampOffset: 18,
+        trafficCount: 16,
+        playerLerp: 0.13,
+        shotCycle: 10,
+        slowZoneLength: 18,
+        maxActiveLamps: 4,
+      };
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xb4cde5);
+      scene.fog = new THREE.Fog(0xb4cde5, CONFIG.fogNear, CONFIG.fogFar);
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.body.appendChild(renderer.domElement);
+
+      const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 2200);
+      scene.add(camera);
+
+      const camRig = new THREE.Object3D();
+      scene.add(camRig);
+      camRig.add(camera);
+
+      const clock = new THREE.Clock();
+      const world = { distance: 0 };
+
+      const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x2b3036, roughness: 0.86, metalness: 0.12 });
+      const roadMarkMaterial = new THREE.MeshStandardMaterial({ color: 0xf3f0d8, emissive: 0x141414, roughness: 0.9, metalness: 0.15 });
+      const barrierMaterial = new THREE.MeshStandardMaterial({ color: 0x646d72, roughness: 0.96 });
+      const concreteMaterial = new THREE.MeshStandardMaterial({ color: 0x7f878d, roughness: 0.95 });
+      const buildingMaterial = new THREE.MeshStandardMaterial({ color: 0x8d9bab, roughness: 0.9, metalness: 0.18 });
+      const laneGlowMaterial = new THREE.MeshStandardMaterial({ color: 0xe6d491, emissive: 0x5c4c1c, roughness: 0.8 });
+
+      const roadSegments = [];
+      const trafficCars = [];
+      const streetLamps = [];
+      const tolls = [];
+      const cityGroup = new THREE.Group();
+      scene.add(cityGroup);
+
+      const hemi = new THREE.HemisphereLight(0xdfeeff, 0x18212f, 1.7);
+      scene.add(hemi);
+
+      const sun = new THREE.DirectionalLight(0xfff1ce, 1.6);
+      sun.position.set(30, 80, 10);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(1024, 1024);
+      sun.shadow.camera.left = -200;
+      sun.shadow.camera.right = 200;
+      sun.shadow.camera.top = 200;
+      sun.shadow.camera.bottom = -200;
+      sun.shadow.camera.near = 1;
+      sun.shadow.camera.far = 220;
+      scene.add(sun);
+
+      const ground = new THREE.Mesh(
+        new THREE.PlaneGeometry(2200, 2200),
+        new THREE.MeshStandardMaterial({ color: 0x515f66, roughness: 1, metalness: 0 })
+      );
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = -0.25;
+      scene.add(ground);
+
+      function roadCenterAt(z) {
+        const drift = Math.sin(z * 0.0062 + 1.3) * 220;
+        const weave = Math.sin(z * 0.013 + 4.4) * 76;
+        const sweep = Math.sin(z * 0.028 + 2.7) * 38;
+        return drift + weave + sweep;
+      }
+
+      function roadHeadingAt(z) {
+        const a = roadCenterAt(z);
+        const b = roadCenterAt(z + 18);
+        return Math.atan2(b - a, 18);
+      }
+
+      function makeCarMesh(color = 0xd91d2b, isTraffic = false) {
+        const group = new THREE.Group();
+        const body = new THREE.Mesh(
+          new THREE.BoxGeometry(isTraffic ? 3.1 : 3.4, 0.85, isTraffic ? 6.4 : 6.8),
+          new THREE.MeshStandardMaterial({ color, roughness: 0.38, metalness: 0.7 })
+        );
+        body.position.y = 1.0;
+        body.castShadow = true;
+        group.add(body);
+
+        const cabin = new THREE.Mesh(
+          new THREE.BoxGeometry(isTraffic ? 2.4 : 2.6, 0.9, isTraffic ? 3.4 : 2.8),
+          new THREE.MeshStandardMaterial({ color: 0xbad4ee, roughness: 0.25, metalness: 0.82, transparent: true, opacity: 0.85 })
+        );
+        cabin.position.set(0, 1.6, isTraffic ? -0.2 : 0.2);
+        cabin.castShadow = true;
+        group.add(cabin);
+
+        const wheelGeo = new THREE.CylinderGeometry(0.48, 0.48, 0.6, 16);
+        const wheelMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.9, metalness: 0.2 });
+        const wheelOffsets = [
+          [-1.4, 0.45, 2.0],
+          [1.4, 0.45, 2.0],
+          [-1.4, 0.45, -2.0],
+          [1.4, 0.45, -2.0],
+        ];
+        for (const [x, y, z] of wheelOffsets) {
+          const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+          wheel.rotation.z = Math.PI / 2;
+          wheel.position.set(x, y, z);
+          wheel.castShadow = true;
+          group.add(wheel);
+        }
+
+        return group;
+      }
+
+      const playerCar = makeCarMesh(0xc8102e, false);
+      playerCar.position.set(0, CONFIG.roadY + 0.2, 6);
+      scene.add(playerCar);
+
+      const playerState = {
+        lane: -CONFIG.laneWidth * 0.9,
+        targetLane: -CONFIG.laneWidth * 0.9,
+        x: roadCenterAt(0) - CONFIG.laneWidth * 0.9,
+        yaw: 0,
+      };
+
+      function addRoadSegment(startZ) {
+        const endZ = startZ + CONFIG.roadSegLength;
+        const a = roadCenterAt(startZ);
+        const b = roadCenterAt(endZ);
+        const centerX = (a + b) * 0.5;
+        const centerZ = (startZ + endZ) * 0.5;
+        const heading = Math.atan2(b - a, endZ - startZ);
+
+        const group = new THREE.Group();
+
+        const road = new THREE.Mesh(new THREE.BoxGeometry(CONFIG.roadWidth, 0.8, CONFIG.roadSegLength + 6), roadMaterial);
+        road.position.set(centerX, CONFIG.roadY, centerZ);
+        road.castShadow = true;
+        road.receiveShadow = true;
+        group.add(road);
+
+        const laneMark = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.12, 10), laneGlowMaterial);
+        laneMark.position.set(centerX, CONFIG.roadY + 0.51, centerZ);
+        group.add(laneMark);
+
+        const leftBarrier = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.1, CONFIG.roadSegLength + 2), barrierMaterial);
+        leftBarrier.position.set(centerX - CONFIG.roadWidth * 0.5 - 1.3, CONFIG.roadY + 0.6, centerZ);
+        group.add(leftBarrier);
+
+        const rightBarrier = leftBarrier.clone();
+        rightBarrier.position.x = centerX + CONFIG.roadWidth * 0.5 + 1.3;
+        group.add(rightBarrier);
+
+        const leftGuard = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.6, CONFIG.roadSegLength + 2), concreteMaterial);
+        leftGuard.position.set(centerX - CONFIG.roadWidth * 0.5 - 2.9, CONFIG.roadY + 1.1, centerZ);
+        group.add(leftGuard);
+
+        const rightGuard = leftGuard.clone();
+        rightGuard.position.x = centerX + CONFIG.roadWidth * 0.5 + 2.9;
+        group.add(rightGuard);
+
+        group.rotation.y = heading;
+        scene.add(group);
+        roadSegments.push({ startZ, endZ, mesh: group });
+      }
+
+      function refreshRoad() {
+        const minZ = world.distance - 100;
+        while (roadSegments.length && roadSegments[0].endZ < minZ) {
+          const oldSegment = roadSegments.shift();
+          scene.remove(oldSegment.mesh);
+        }
+
+        let lastZ = roadSegments.length ? roadSegments[roadSegments.length - 1].endZ : 0;
+        while (lastZ < world.distance + CONFIG.farDistance) {
+          addRoadSegment(lastZ);
+          lastZ += CONFIG.roadSegLength;
+        }
+
+        for (const segment of roadSegments) {
+          segment.mesh.position.z = segment.startZ - world.distance;
+        }
+      }
+
+      function addLamp(z, side) {
+        const post = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.3, 0.4, 8, 12),
+          new THREE.MeshStandardMaterial({ color: 0x3d4348, roughness: 0.9, metalness: 0.18 })
+        );
+        const x = roadCenterAt(z) + side * (CONFIG.roadWidth * 0.55 + CONFIG.lampOffset);
+        post.position.set(x, 4.2, z - world.distance);
+        scene.add(post);
+
+        const lampHead = new THREE.Mesh(
+          new THREE.BoxGeometry(0.8, 0.4, 1.2),
+          new THREE.MeshStandardMaterial({ color: 0xf7f5db, emissive: 0x7b6a2e, roughness: 0.5 })
+        );
+        lampHead.position.set(x, 8.2, z - world.distance);
+        scene.add(lampHead);
+
+        let lampLight = null;
+        if (streetLamps.length < CONFIG.maxActiveLamps) {
+          lampLight = new THREE.SpotLight(0xfff3c6, 2.2, 120, Math.PI / 6, 0.62, 1.1);
+          lampLight.position.set(x, 8.2, z - world.distance);
+          lampLight.target.position.set(x, 0.2, z - world.distance + 18);
+          lampLight.castShadow = true;
+          lampLight.shadow.mapSize.set(512, 512);
+          scene.add(lampLight);
+          scene.add(lampLight.target);
+        }
+
+        streetLamps.push({ z, side, post, lampHead, light: lampLight });
+      }
+
+      function refreshLamps() {
+        for (const lamp of streetLamps) {
+          const x = roadCenterAt(lamp.z) + lamp.side * (CONFIG.roadWidth * 0.55 + CONFIG.lampOffset);
+          lamp.post.position.set(x, 4.2, lamp.z - world.distance);
+          lamp.lampHead.position.set(x, 8.2, lamp.z - world.distance);
+          if (lamp.light) {
+            lamp.light.position.set(x, 8.2, lamp.z - world.distance);
+            lamp.light.target.position.set(x, 0.4, lamp.z - world.distance + 18);
+          }
+        }
+
+        const maxLampZ = world.distance + CONFIG.farDistance;
+        let lampZ = Math.ceil((world.distance - 80) / CONFIG.lampSpacing) * CONFIG.lampSpacing;
+        if (lampZ < world.distance - 80) {
+          lampZ += CONFIG.lampSpacing;
+        }
+        const seen = new Set();
+        while (lampZ < maxLampZ + 80) {
+          const leftKey = `l:${lampZ}:left`;
+          const rightKey = `l:${lampZ}:right`;
+          if (!seen.has(leftKey)) {
+            seen.add(leftKey);
+          }
+          if (!seen.has(rightKey)) {
+            seen.add(rightKey);
+          }
+          if (!streetLamps.some((lamp) => lamp.z === lampZ && lamp.side === -1)) {
+            addLamp(lampZ, -1);
+          }
+          if (!streetLamps.some((lamp) => lamp.z === lampZ && lamp.side === 1)) {
+            addLamp(lampZ, 1);
+          }
+          lampZ += CONFIG.lampSpacing;
+        }
+
+        const activeLamps = streetLamps.filter((lamp) => lamp.z > world.distance - 120 && lamp.z < world.distance + CONFIG.farDistance + 80);
+        for (const lamp of streetLamps) {
+          if (!activeLamps.includes(lamp)) {
+            scene.remove(lamp.post);
+            scene.remove(lamp.lampHead);
+            if (lamp.light) {
+              scene.remove(lamp.light);
+              scene.remove(lamp.light.target);
+            }
+          }
+        }
+        for (let i = streetLamps.length - 1; i >= 0; i--) {
+          if (!activeLamps.includes(streetLamps[i])) {
+            streetLamps.splice(i, 1);
+          }
+        }
+      }
+
+      function addCityBlock(z, side) {
+        const blockCount = 18;
+        const widthBase = 22 + Math.random() * 14;
+        const height = 35 + Math.random() * 145;
+        const depth = 20 + Math.random() * 18;
+        const building = new THREE.Mesh(new THREE.BoxGeometry(widthBase, height, depth), buildingMaterial);
+        const roadOffset = side * (CONFIG.roadWidth * 1.2 + 35 + Math.random() * 45);
+        const x = roadCenterAt(z) + roadOffset;
+        building.position.set(x, height * 0.5, z - world.distance + (Math.random() - 0.5) * 18);
+        building.castShadow = true;
+        building.receiveShadow = true;
+        cityGroup.add(building);
+        return building;
+      }
+
+      function regenerateCity() {
+        const threshold = world.distance + CONFIG.farDistance;
+        for (const child of cityGroup.children) {
+          const z = child.position.z + world.distance;
+          if (z < world.distance - 150 || z > threshold + 150) {
+            cityGroup.remove(child);
+          }
+        }
+
+        for (let z = Math.floor((world.distance - 300) / 90) * 90; z < world.distance + CONFIG.farDistance + 300; z += 90) {
+          const blockChance = 0.72;
+          if (Math.random() > blockChance) {
+            continue;
+          }
+          if (!cityGroup.children.some((child) => {
+            const positionZ = child.position.z + world.distance;
+            return Math.abs(positionZ - z) < 18;
+          })) {
+            addCityBlock(z, -1);
+            addCityBlock(z, 1);
+          }
+        }
+      }
+
+      function spawnTraffic() {
+        while (trafficCars.length < CONFIG.trafficCount) {
+          const lane = 1.0;
+          const worldZ = Math.random() * (CONFIG.farDistance * 1.7) + 120;
+          const car = makeCarMesh(0x9ca7ae, true);
+          car.position.set(roadCenterAt(worldZ) + lane * CONFIG.laneWidth, CONFIG.roadY + 0.25, worldZ - world.distance);
+          car.rotation.y = Math.PI;
+          scene.add(car);
+          trafficCars.push({ mesh: car, z: worldZ, lane, speed: 70 + Math.random() * 18, color: 0x9ca7ae });
+        }
+      }
+
+      function updateTraffic(dt) {
+        for (let i = trafficCars.length - 1; i >= 0; i--) {
+          const item = trafficCars[i];
+          item.z += item.speed * dt * 0.72;
+          const localZ = item.z - world.distance;
+          if (localZ > CONFIG.farDistance + 80 || localZ < -200) {
+            scene.remove(item.mesh);
+            trafficCars.splice(i, 1);
+            continue;
+          }
+          const roadX = roadCenterAt(item.z);
+          item.mesh.position.set(roadX + item.lane * CONFIG.laneWidth, CONFIG.roadY + 0.25, localZ);
+          item.mesh.rotation.y = roadHeadingAt(item.z) + Math.PI;
+        }
+
+        while (trafficCars.length < CONFIG.trafficCount) {
+          const lane = 1.0;
+          const worldZ = world.distance + 180 + trafficCars.length * 70 + Math.random() * 180;
+          const car = makeCarMesh(0x9ca7ae, true);
+          car.position.set(roadCenterAt(worldZ) + lane * CONFIG.laneWidth, CONFIG.roadY + 0.25, worldZ - world.distance);
+          car.rotation.y = Math.PI;
+          scene.add(car);
+          trafficCars.push({ mesh: car, z: worldZ, lane, speed: 65 + Math.random() * 20 });
+        }
+      }
+
+      function addToll(starterZ) {
+        const x = roadCenterAt(starterZ);
+        const group = new THREE.Group();
+        const base = new THREE.Mesh(new THREE.BoxGeometry(18, 10, 12), concreteMaterial);
+        base.position.set(x, 18, starterZ - world.distance);
+        group.add(base);
+
+        const beam = new THREE.Mesh(new THREE.BoxGeometry(20, 4, 2), barrierMaterial);
+        beam.position.set(x, 22, starterZ - world.distance + 2);
+        beam.rotation.y = roadHeadingAt(starterZ);
+        group.add(beam);
+
+        const supportLeft = new THREE.Mesh(new THREE.BoxGeometry(1.4, 18, 1.4), concreteMaterial);
+        const supportRight = supportLeft.clone();
+        supportLeft.position.set(x - 7, 9, starterZ - world.distance - 4);
+        supportRight.position.set(x + 7, 9, starterZ - world.distance - 4);
+        group.add(supportLeft, supportRight);
+
+        scene.add(group);
+        tolls.push({ z: starterZ, group, active: true });
+      }
+
+      function refreshTolls() {
+        const need = Math.max(0, Math.floor((world.distance + 300) / 420));
+        for (let i = 0; i < need; i++) {
+          const z = 380 + i * 450 + Math.random() * 80;
+          if (!tolls.some((toll) => Math.abs(toll.z - z) < 120)) {
+            addToll(z);
+          }
+        }
+
+        for (let i = tolls.length - 1; i >= 0; i--) {
+          const toll = tolls[i];
+          const localZ = toll.z - world.distance;
+          if (localZ > CONFIG.farDistance + 130 || localZ < -200) {
+            scene.remove(toll.group);
+            tolls.splice(i, 1);
+            continue;
+          }
+          toll.group.position.z = toll.z - world.distance;
+          toll.group.position.x = roadCenterAt(toll.z);
+          toll.group.rotation.y = roadHeadingAt(toll.z);
+        }
+      }
+
+      function applyAutomaticWeave(dt) {
+        const avoidanceWindow = 36;
+        const visionAhead = 50;
+        let forcedLane = null;
+
+        for (const item of trafficCars) {
+          const delta = item.z - (world.distance + 8);
+          if (delta > 0 && delta < visionAhead) {
+            const playerX = playerState.x;
+            const targetX = roadCenterAt(world.distance) + item.lane * CONFIG.laneWidth;
+            if (Math.abs(item.mesh.position.x - playerX) < avoidanceWindow) {
+              forcedLane = item.lane > 0 ? -0.9 : 0.9;
+            }
+          }
+        }
+
+        const weave = Math.sin((world.distance * 0.04) + performance.now() * 0.0009) * 1.6;
+        if (forcedLane !== null) {
+          playerState.targetLane = forcedLane * CONFIG.laneWidth;
+        } else {
+          playerState.targetLane = weave * CONFIG.laneWidth * 0.7;
+        }
+
+        playerState.lane = THREE.MathUtils.lerp(playerState.lane, playerState.targetLane, dt * 2.0);
+        const roadX = roadCenterAt(world.distance);
+        const fwdTarget = roadX + playerState.lane;
+        playerState.x = THREE.MathUtils.lerp(playerState.x, fwdTarget, CONFIG.playerLerp);
+        playerCar.position.x = playerState.x;
+        playerCar.position.y = CONFIG.roadY + 0.2;
+        playerCar.position.z = 6;
+        playerCar.rotation.z = THREE.MathUtils.lerp(playerCar.rotation.z, (playerState.targetLane - playerState.lane) * 0.04, dt * 5);
+      }
+
+      function setCameraShot(modeName) {
+        const shots = {
+          chase: { cam: new THREE.Vector3(0, 4.2, 12), look: new THREE.Vector3(0, 1.6, -30) },
+          frontLow: { cam: new THREE.Vector3(0, 1.8, -8), look: new THREE.Vector3(0, 1.2, 80) },
+          rearQuarter: { cam: new THREE.Vector3(-10, 3.4, -12), look: new THREE.Vector3(0, 2.1, -20) },
+          wheelClose: { cam: new THREE.Vector3(2.3, 2.1, 0.8), look: new THREE.Vector3(0, 1.2, -10) },
+        };
+
+        const shot = shots[modeName];
+        const offset = new THREE.Vector3();
+        playerCar.getWorldPosition(offset);
+        const targetCam = offset.clone().add(shot.cam.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), playerCar.rotation.y));
+        const lookTarget = offset.clone().add(shot.look.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), playerCar.rotation.y));
+
+        camera.position.lerp(targetCam, 0.08);
+        camera.lookAt(lookTarget);
+      }
+
+      let shotIndex = 0;
+      const shotNames = ['chase', 'frontLow', 'rearQuarter', 'wheelClose'];
+      let shotTimer = 0;
+
+      function updateCameras(dt) {
+        shotTimer += dt;
+        if (shotTimer > CONFIG.shotCycle) {
+          shotTimer = 0;
+          shotIndex = (shotIndex + 1) % shotNames.length;
+        }
+        setCameraShot(shotNames[shotIndex]);
+      }
+
+      function buildInitialScene() {
+        const startZ = 0;
+        let z = startZ;
+        while (z < CONFIG.farDistance + 400) {
+          addRoadSegment(z);
+          z += CONFIG.roadSegLength;
+        }
+
+        for (let z = 120; z < CONFIG.farDistance + 500; z += CONFIG.lampSpacing) {
+          addLamp(z, -1);
+          addLamp(z, 1);
+        }
+
+        spawnTraffic();
+
+        for (let i = 0; i < 12; i++) {
+          const z = 360 + i * 420 + Math.random() * 100;
+          addToll(z);
+        }
+
+        for (let i = 0; i < CONFIG.towerCount; i++) {
+          const tower = new THREE.Mesh(new THREE.BoxGeometry(18 + Math.random() * 28, 30 + Math.random() * 210, 18 + Math.random() * 28), buildingMaterial);
+          const side = i % 2 === 0 ? -1 : 1;
+          const x = roadCenterAt(i * 40 + 100) + side * (180 + Math.random() * 120);
+          tower.position.set(x, tower.geometry.parameters.height * 0.5, i * 26 - 40);
+          tower.castShadow = true;
+          tower.receiveShadow = true;
+          cityGroup.add(tower);
+        }
+      }
+
+      function updateWorld(dt) {
+        world.distance += CONFIG.worldSpeed * dt;
+        refreshRoad();
+        refreshLamps();
+        refreshTolls();
+        regenerateCity();
+        updateTraffic(dt);
+      }
+
+      buildInitialScene();
+      const clockNow = clock.getElapsedTime();
+      function animate() {
+        requestAnimationFrame(animate);
+        const dt = Math.min(clock.getDelta(), 0.033);
+        updateWorld(dt);
+        applyAutomaticWeave(dt);
+        updateCameras(dt);
+        renderer.render(scene, camera);
+      }
+      animate();
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

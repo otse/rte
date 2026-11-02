@@ -2,6 +2,8 @@ here is the single prompt for haiku or claude to write the rte demo (route)
 
 "rte" is a tokyo style car driving demo on the japanese freeway (like the shuto expressway.) the road never stops or slows down, and is generated endlessly. the city is just a bunch of skyscrapers.
 
+[write your own version without peeking.] don't read htmls like grok.html or mai-code-flash.html.
+
 [the demo is a japanesque.] the demo will feature a generic japanese car on a generic japanese highway. this is not a simulator. the difference lies in symbols, signage and other stuff.
 
 [not a game.] there are no controls. rte is like a screensaver, or a demo, rather than a playable game.
@@ -42,4 +44,8 @@ here is the single prompt for haiku or claude to write the rte demo (route)
 
 [reuse objects.] to prevent fps spikes, place objects that share geometry and materials.
 
-[use placeholder objects.] don't try to generate complex geometry, use gray boxes or rectangles; i will personally source and supply 3d models that fit the demo.
+[.glb car models.] our car gets a car model, but it has too many triangles and vertices to use for other traffic.
+
+[use /textures.] to bring the demo alive, use the concrete, road, metal and high riser textures.
+
+[use placeholder objects.] don't try to generate complex geometry, just use gray boxes or rectangles to represent signs or skyscrapers
